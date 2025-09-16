@@ -50,7 +50,7 @@ except ImportError:  # pragma: no cover
 # Heuristic patterns - tweak if your scanner uses other naming conventions
 GUESS_RULES = {
     "anat": {
-        "T1w": re.compile(r"(?i)(T1|ADNI|MPRAGE)")
+        "T1w": re.compile(r"(?i)(T1|ADNI|MPRAGE|MP2RAGE|me4)")
     },
     "func": {
         # Detects BOLD fMRI series. Task and run are parsed later.
@@ -71,11 +71,12 @@ def natural_sort_key(text: str):
 
 
 def scan_source(source: Path) -> List[Path]:
-    """Return *.nii* and *.nii.gz* paths sorted alphanumerically."""
+    """Return *.nii* and *.nii.gz* paths sorted alphanumerically, recursively."""
     return sorted(
-        itertools.chain(source.glob("*.nii"), source.glob("*.nii.gz")),
+        itertools.chain(source.rglob("*.nii"), source.rglob("*.nii.gz")),
         key=lambda p: natural_sort_key(p.name),
     )
+# filepath: /ptmp/sfassnacht/MPIpe/generate_bids_config.py
 
 
 def series_id(p: Path) -> str:

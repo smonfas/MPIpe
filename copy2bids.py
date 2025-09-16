@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# filepath: /ptmp/sfassnacht/MPIpe/copy2bids.py
 """copy2bids.py - Stage-2 script: copy / hard-link / symlink series into a
 BIDS-compatible folder tree **based on a YAML/JSON mapping** produced by
 *generate_bids_config.py* (or edited by hand).
@@ -37,6 +38,7 @@ Assumptions & highlights
 * Three copy modes: ``copy`` (shutil.copy2), ``link`` (hard-link),
   ``symlink`` (relative symlink).
 * Add ``--dry`` for a dry-run (print what would happen).
+* Add ``--filenaming`` to preserve original filenames in BIDS folders.
 
 Usage example
 -------------
@@ -48,6 +50,7 @@ python copy2bids.py \
     --config mapping.yaml \
     --events-dir /data/onsets \
     --method link            # copy|link|symlink
+    --filenaming            # preserve original filenames
 ```
 """
 from __future__ import annotations
@@ -68,6 +71,10 @@ except ImportError:  # pragma: no cover
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+def find_file(source: Path, stem: str, ext: str) -> Path | None:
+    """Recursively search for a file with given stem and extension."""
+    matches = list(source.rglob(f"{stem}{ext}"))
+    return matches[0] if matches else None
 
 def load_mapping(cfg_path: Path) -> Dict[str, Any]:
     """Load YAML or JSON mapping file."""
@@ -120,6 +127,7 @@ def main():  # noqa: C901 (complex but clear)
     p.add_argument("--subject", help="Override subject ID [default: basename of --source]")
     p.add_argument("--method", choices=["copy", "link", "symlink"], default="copy", help="Copy method [link]")
     p.add_argument("--dry", action="store_true", help="Dry-run - print actions but don't write")
+    p.add_argument("--filenaming", action="store_true", help="If set, keep original filenames in BIDS folders")
     args = p.parse_args()
 
     # ---------------- Validate paths ----------------
@@ -139,11 +147,14 @@ def main():  # noqa: C901 (complex but clear)
     for label, series_list in mapping.get("anat", {}).items():
         for stem in series_list:
             for ext in (".nii.gz", ".json"):
-                src = args.source / f"{stem}{ext}"
-                if not src.exists():
-                    print(f"WARNING - missing file {src}")
+                src = find_file(args.source, stem, ext)
+                if not src or not src.exists():
+                    print(f"WARNING - missing file for {stem}{ext}")
                     continue
-                dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "anat" / build_dest_name(subject, session, label, ext)
+                if args.filenaming:
+                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "anat" / src.name
+                else:
+                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "anat" / build_dest_name(subject, session, label, ext)
                 copy_file(src, dst, args.method, args.dry)
 
     # ---------------- Copy functional ----------------
@@ -155,19 +166,25 @@ def main():  # noqa: C901 (complex but clear)
                 if stem is None:
                     continue
                 for ext in (".nii.gz", ".json"):
-                    src = args.source / f"{stem}{ext}"
-                    if not src.exists():
-                        print(f"WARNING - missing file {src}")
+                    src = find_file(args.source, stem, ext)
+                    if not src or not src.exists():
+                        print(f"WARNING - missing file {stem}{ext}")
                         continue
-                    bids_suffix = f"task-{task}_" + run_label + f"_{suffix}"
-                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / build_dest_name(subject, session, bids_suffix, ext)
+                    if args.filenaming:
+                        dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / src.name
+                    else:
+                        bids_suffix = f"task-{task}_" + run_label + f"_{suffix}"
+                        dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / build_dest_name(subject, session, bids_suffix, ext)
                     copy_file(src, dst, args.method, args.dry)
 
             # ---- events ----
             if args.events_dir and not args.dry:
                 events_src = args.events_dir / f"task-{task}_{run_label}_events.tsv"
                 if events_src.exists():
-                    events_dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / build_dest_name(subject, session, f"task-{task}_{run_label}_events", ".tsv")
+                    if args.filenaming:
+                        events_dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / events_src.name
+                    else:
+                        events_dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / build_dest_name(subject, session, f"task-{task}_{run_label}_events", ".tsv")
                     copy_file(events_src, events_dst, args.method, args.dry)
                 else:
                     print(f"Note: no events file found for {task} {run_label}")
@@ -176,12 +193,15 @@ def main():  # noqa: C901 (complex but clear)
     for fmap_type, fmap_dict in mapping.get("fmap", {}).items():
         for key, stem in fmap_dict.items():
             for ext in (".nii.gz", ".json"):
-                src = args.source / f"{stem}{ext}"
-                if not src.exists():
+                src = find_file(args.source, stem, ext)
+                if not src or not src.exists():
                     print(f"WARNING - missing file {src}")
                     continue
-                bids_suffix = key  # magnitude1 / phase1 / phase2
-                dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "fmap" / build_dest_name(subject, session, bids_suffix, ext)
+                if args.filenaming:
+                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "fmap" / src.name
+                else:
+                    bids_suffix = key  # magnitude1 / phase1 / phase2
+                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "fmap" / build_dest_name(subject, session, bids_suffix, ext)
                 copy_file(src, dst, args.method, args.dry)
 
     print("\n✔ Done (dry-run)" if args.dry else "\n✔ Finished copying/linking.")
