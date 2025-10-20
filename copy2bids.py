@@ -1,83 +1,25 @@
 #!/usr/bin/env python3
-# filepath: /ptmp/sfassnacht/MPIpe/copy2bids.py
-"""copy2bids.py - Stage-2 script: copy / hard-link / symlink series into a
-BIDS-compatible folder tree **based on a YAML/JSON mapping** produced by
-*generate_bids_config.py* (or edited by hand).
-
-Assumptions & highlights
-------------------------
-* **Single-session dataset** → session name is hard-wired as ``ses-01``.
-* Works with *already converted* NIfTI + JSON sidecars - one file pair per
-  series.
-* Mapping file structure (YAML or JSON) **must** look like::
-
-    anat:
-      T1w:
-        - 0008_ADNI_192slices_64channel
-
-    func:
-      rest:
-        run-01:
-          bold: 0010_cmrr_mbep2d_bold_64ch_MB2_GRAPPA2_2mm_PRG_TR2000
-          sbref: 0009_cmrr_mbep2d_bold_64ch_MB2_GRAPPA2_2mm_PRG_TR2000_SBRef
-        run-02:
-          bold: 0012_cmrr_mbep2d_bold_64ch_MB2_GRAPPA2_2mm_PRG_TR2000
-
-    fmap:
-      gre:
-        magnitude1: 0025_gre_field_mapping_e1
-        phase1:     0025_gre_field_mapping_e2
-        phase2:     0026_gre_field_mapping_e2_ph
-
-* The **series names** (e.g. ``0010_cmrr_…``) are *stems* - the ``.nii.gz``
-  and matching ``.json`` must exist in `--source`.
-* The **subject ID** defaults to the *leaf directory name* of `--source` but
-  can be overridden with ``--subject``.
-* Optional ``--events-dir``: the script looks for files named
-  ``task-<task>_run-<NN>_events.tsv`` and copies them next to the BOLD run.
-* Three copy modes: ``copy`` (shutil.copy2), ``link`` (hard-link),
-  ``symlink`` (relative symlink).
-* Add ``--dry`` for a dry-run (print what would happen).
-* Add ``--filenaming`` to preserve original filenames in BIDS folders.
-
-Usage example
--------------
-
-```bash
-python copy2bids.py \
-    --source /data/GCCP-KVKI/DICOM_NIFTI \
-    --dest   /data/BIDS_root \
-    --config mapping.yaml \
-    --events-dir /data/onsets \
-    --method link            # copy|link|symlink
-    --filenaming            # preserve original filenames
-```
-"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import yaml  # type: ignore
 except ImportError:  # pragma: no cover
-    yaml = None  # will still support JSON configs
+    yaml = None
 
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-def find_file(source: Path, stem: str, ext: str) -> Path | None:
-    """Recursively search for a file with given stem and extension."""
+def find_file(source: Path, stem: str, ext: str) -> Optional[Path]:
     matches = list(source.rglob(f"{stem}{ext}"))
     return matches[0] if matches else None
 
 def load_mapping(cfg_path: Path) -> Dict[str, Any]:
-    """Load YAML or JSON mapping file."""
     text = cfg_path.read_text()
     if cfg_path.suffix.lower() in {".yaml", ".yml"}:
         if yaml is None:
@@ -88,13 +30,10 @@ def load_mapping(cfg_path: Path) -> Dict[str, Any]:
     except json.JSONDecodeError as e:
         sys.exit(f"Config file not valid JSON or YAML: {e}")
 
-
 def copy_file(src: Path, dst: Path, method: str, dry: bool = False):
-    """Copy/link a file depending on *method* (copy|link|symlink)."""
     if dry:
         print(f" [DRY] {method.upper():6} {src} -> {dst}")
         return
-
     dst.parent.mkdir(parents=True, exist_ok=True)
     if method == "copy":
         shutil.copy2(src, dst)
@@ -107,105 +46,178 @@ def copy_file(src: Path, dst: Path, method: str, dry: bool = False):
             dst.unlink()
         rel = os.path.relpath(src, dst.parent)
         os.symlink(rel, dst)
-    else:  # pragma: no cover
+    else:
         raise ValueError(f"Unknown method: {method}")
 
+# -------- parsing utilities --------
+EXT_STRIP = re.compile(r"\.(nii(\.gz)?|json)$", re.I)
+LEADING_INDEX = re.compile(r"^[\s_-]*\d+[\s_-]*")  # fixed: drop leading digits + optional separators
 
-def build_dest_name(subject: str, session: str, suffix: str, ext: str = ".nii.gz") -> str:
-    return f"sub-{subject}_ses-{session}_{suffix}{ext}"
+def normalize_stem(stem: str) -> str:
+    s = EXT_STRIP.sub("", stem)
+    s = s.strip()
+    s = LEADING_INDEX.sub("", s)
+    return s.lower()
 
-# -----------------------------------------------------------------------------
-# Main routine
-# -----------------------------------------------------------------------------
+# Sequence detection (mutually exclusive — each pattern is independent)
+SEQ_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    ("vaso",           re.compile(r"(?i)(?<![a-z0-9])vaso(?![a-z0-9])")),
+    ("bssfp",          re.compile(r"(?i)(?<![a-z0-9])(3d)?bssfp(?![a-z0-9])")),
+    ("ep2d_bold_2000", re.compile(r"(?i)(?<![a-z0-9])ep2d[^a-z0-9]*bold[^a-z0-9]*2000(?![a-z0-9])")),
+    ("ep2d_bold_800",  re.compile(r"(?i)(?<![a-z0-9])ep2d[^a-z0-9]*bold[^a-z0-9]*800(?![a-z0-9])")),
+    ("mprage",         re.compile(r"(?i)(?<![a-z0-9])mprage(?![a-z0-9])")),
+]
 
-def main():  # noqa: C901 (complex but clear)
-    p = argparse.ArgumentParser(description="Copy/link NIfTI series into a BIDS tree using a mapping (single-session)")
-    p.add_argument("--source", required=True, type=Path, help="Folder with *.nii.gz / *.json series")
-    p.add_argument("--dest", required=True, type=Path, help="Root of BIDS dataset (will be created if absent)")
-    p.add_argument("--config", required=True, type=Path, help="YAML or JSON mapping file")
-    p.add_argument("--events-dir", type=Path, help="Folder with *_events.tsv files [optional]")
-    p.add_argument("--subject", help="Override subject ID [default: basename of --source]")
-    p.add_argument("--method", choices=["copy", "link", "symlink"], default="copy", help="Copy method [link]")
-    p.add_argument("--dry", action="store_true", help="Dry-run - print actions but don't write")
-    p.add_argument("--filenaming", action="store_true", help="If set, keep original filenames in BIDS folders")
+# Modality detection: pick the first that appears; else fallback to "prep" in parse_modality()
+MOD_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    ("task", re.compile(r"(?i)(?<![a-z0-9])task(?![a-z0-9])")),
+    ("rs",   re.compile(r"(?i)(?<![a-z0-9])rs(?![a-z0-9])")),
+    ("test", re.compile(r"(?i)(?<![a-z0-9])test(?![a-z0-9])")),
+]
+RUN_EXPLICIT_END = re.compile(r"(?:^|[_-])run[-_]?(\d{1,2})$", re.I)
+RUN_ANY = re.compile(r"(?:^|[_-])run[-_]?(\d{1,2})\b", re.I)
+
+def parse_sequence(name: str) -> str:
+    matches = [label for label, pat in SEQ_PATTERNS if pat.search(name)]
+    if not matches:
+        return "unknownseq"
+    if len(matches) > 1:
+        print(f"⚠ Multiple sequence tokens in '{name}': {matches} → using '{matches[0]}'")
+    return matches[0]
+def parse_modality(name: str) -> str:
+    for label, pat in MOD_PATTERNS:
+        if pat.search(name):
+            return label
+    return "prep"
+
+
+def parse_run(name: str) -> Optional[str]:
+    m = RUN_EXPLICIT_END.search(name)
+    if m:
+        return f"run-{int(m.group(1)):02d}"
+    matches = list(RUN_ANY.finditer(name))
+    if matches:
+        return f"run-{int(matches[-1].group(1)):02d}"
+    return None
+
+def build_custom_name(subject: str, session: str, src_stem: str, idx_for_fallback: int | None = None) -> str:
+    n = normalize_stem(src_stem)
+    seq = parse_sequence(n)
+    mod = parse_modality(n)
+    run = parse_run(n)
+    if not run:
+        run = f"run-{(idx_for_fallback or 1):02d}"
+    return f"{subject}_{session}_{seq}_{mod}_{run}"
+
+def build_bids_dest_name(subject: str, session: str, suffix: str, ext: str = ".nii.gz") -> str:
+    return f"{subject}_{session}_{suffix}{ext}"
+
+# -------- copy routines --------
+def copy_section_list(stems: List[str], source: Path, dest: Path, subject: str, session: str,
+                      method: str, dry: bool, filenaming: str, section: str, counters: Dict[str, int]):
+    assert section in {"anat", "func", "fmap"}
+
+    def bids_suffix_for(sec: str) -> str:
+        if sec == "anat":
+            return "T1w"
+        if sec == "func":
+            counters.setdefault("bids_func_idx", 0)
+            counters["bids_func_idx"] += 1
+            return f"task-unk_run-{counters['bids_func_idx']:02d}_bold"
+        counters.setdefault("bids_fmap_idx", 0)
+        counters["bids_fmap_idx"] += 1
+        return f"fmap{counters['bids_fmap_idx']:02d}"
+
+    for stem in stems:
+        if not stem:
+            continue
+
+        # compute name stem once per series
+        out_stem_custom: str | None = None
+        out_suffix_bids: str | None = None
+
+        if filenaming == "custom":
+            n = normalize_stem(stem)
+            seq = parse_sequence(n)
+
+            # Only functional runs have a modality component
+            mod = parse_modality(n) if section == "func" else None
+
+            explicit_run = parse_run(n)
+            if explicit_run is None:
+                # run counter resets per (section, seq, mod)
+                key = f"{section}:{seq}:{mod or 'none'}"
+                counters.setdefault(key, 0)
+                counters[key] += 1
+                run = f"run-{counters[key]:02d}"
+            else:
+                run = explicit_run
+
+            # Custom naming logic per section
+            if section == "func":
+                out_stem_custom = f"{subject}_{session}_{seq}_{mod}_{run}"
+            elif section == "anat":
+                out_stem_custom = f"{subject}_{session}_{seq}_{run}"
+            elif section == "fmap":
+                # fmap files always get '_revpe' at the end
+                out_stem_custom = f"{subject}_{session}_{seq}_{run}_revpe"
+
+        elif filenaming == "bids":
+            out_suffix_bids = bids_suffix_for(section)
+
+        # Copy .nii.gz and .json
+        for ext in (".nii.gz", ".json"):
+            src = find_file(source, stem, ext)
+            if not src or not src.exists():
+                print(f"WARNING - missing file {stem}{ext}")
+                continue
+
+            if filenaming == "preserve":
+                out_name = src.name
+            elif filenaming == "custom":
+                out_name = f"{out_stem_custom}{ext}"
+            elif filenaming == "bids":
+                out_name = build_bids_dest_name(subject, session, out_suffix_bids, ext)
+            else:
+                raise ValueError("Invalid filenaming mode")
+
+            dst = dest / f"{subject}" / f"{session}" / section / out_name
+            copy_file(src, dst, method, dry)
+
+def main():  # noqa: C901
+    p = argparse.ArgumentParser(description="Copy/link NIfTI series into a flat-mapped BIDS tree (anat/func/fmap lists)")
+    p.add_argument("--source", required=True, type=Path, help="Folder with *.nii(.gz) / *.json series")
+    p.add_argument("--dest", required=True, type=Path, help="Root of BIDS dataset (created if needed)")
+    p.add_argument("--config", required=True, type=Path, help="YAML or JSON mapping file (flat lists for anat/func/fmap)")
+    p.add_argument("--subject", required=True, help="Subject ID (same for all files)")
+    p.add_argument("--session", required=True, help="Session ID (same for all files)")
+    p.add_argument("--method", choices=["copy", "link", "symlink"], default="copy", help="Copy method [copy]")
+    p.add_argument("--dry", action="store_true", help="Dry-run - print actions only")
+    p.add_argument(
+        "--filenaming",
+        choices=["preserve", "custom", "bids"],
+        default="custom",
+        help="Filename strategy: preserve original, custom (subject-session-sequence-modality-run), or simple bids-ish.",
+    )
     args = p.parse_args()
 
-    # ---------------- Validate paths ----------------
     if not args.source.is_dir():
         sys.exit(f"Source directory not found: {args.source}")
     if not args.config.is_file():
         sys.exit(f"Config file not found: {args.config}")
-    if args.events_dir and not args.events_dir.is_dir():
-        sys.exit(f"Events directory not found: {args.events_dir}")
-
-    subject = args.subject or args.source.name
-    session = "01"  # one-session rule
 
     mapping = load_mapping(args.config)
+    anat_list: List[str] = mapping.get("anat", []) or []
+    func_list: List[str] = mapping.get("func", []) or []
+    fmap_list: List[str] = mapping.get("fmap", []) or []
 
-    # ---------------- Copy anatomical ----------------
-    for label, series_list in mapping.get("anat", {}).items():
-        for stem in series_list:
-            for ext in (".nii.gz", ".json"):
-                src = find_file(args.source, stem, ext)
-                if not src or not src.exists():
-                    print(f"WARNING - missing file for {stem}{ext}")
-                    continue
-                if args.filenaming:
-                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "anat" / src.name
-                else:
-                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "anat" / build_dest_name(subject, session, label, ext)
-                copy_file(src, dst, args.method, args.dry)
+    counters: Dict[str, int] = {}
 
-    # ---------------- Copy functional ----------------
-    for task, runs in mapping.get("func", {}).items():
-        for run_label, entry in runs.items():
-            bold_stem = entry["bold"]
-            sbref_stem = entry.get("sbref")
-            for stem, suffix in ((bold_stem, "bold"), (sbref_stem, "sbref") if sbref_stem else ()):  # type: ignore
-                if stem is None:
-                    continue
-                for ext in (".nii.gz", ".json"):
-                    src = find_file(args.source, stem, ext)
-                    if not src or not src.exists():
-                        print(f"WARNING - missing file {stem}{ext}")
-                        continue
-                    if args.filenaming:
-                        dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / src.name
-                    else:
-                        bids_suffix = f"task-{task}_" + run_label + f"_{suffix}"
-                        dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / build_dest_name(subject, session, bids_suffix, ext)
-                    copy_file(src, dst, args.method, args.dry)
-
-            # ---- events ----
-            if args.events_dir and not args.dry:
-                events_src = args.events_dir / f"task-{task}_{run_label}_events.tsv"
-                if events_src.exists():
-                    if args.filenaming:
-                        events_dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / events_src.name
-                    else:
-                        events_dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "func" / build_dest_name(subject, session, f"task-{task}_{run_label}_events", ".tsv")
-                    copy_file(events_src, events_dst, args.method, args.dry)
-                else:
-                    print(f"Note: no events file found for {task} {run_label}")
-
-    # ---------------- Copy fieldmaps ----------------
-    for fmap_type, fmap_dict in mapping.get("fmap", {}).items():
-        for key, stem in fmap_dict.items():
-            for ext in (".nii.gz", ".json"):
-                src = find_file(args.source, stem, ext)
-                if not src or not src.exists():
-                    print(f"WARNING - missing file {src}")
-                    continue
-                if args.filenaming:
-                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "fmap" / src.name
-                else:
-                    bids_suffix = key  # magnitude1 / phase1 / phase2
-                    dst = args.dest / f"sub-{subject}" / f"ses-{session}" / "fmap" / build_dest_name(subject, session, bids_suffix, ext)
-                copy_file(src, dst, args.method, args.dry)
+    copy_section_list(anat_list, args.source, args.dest, args.subject, args.session, args.method, args.dry, args.filenaming, "anat", counters)
+    copy_section_list(func_list, args.source, args.dest, args.subject, args.session, args.method, args.dry, args.filenaming, "func", counters)
+    copy_section_list(fmap_list, args.source, args.dest, args.subject, args.session, args.method, args.dry, args.filenaming, "fmap", counters)
 
     print("\n✔ Done (dry-run)" if args.dry else "\n✔ Finished copying/linking.")
-
 
 if __name__ == "__main__":
     main()

@@ -1,12 +1,15 @@
 anat:
-  T1w:
-  - 00004_db_MP2RAGE_Nav_0p5iso_UP_7msTRF
-  - 00005_db_MP2RAGE_0p75_UP_3x1
-  - 00006_db_MP2RAGE_0p75_UP_3x1_ph
-  - 00007_MP2RAGE_2x2d1_500_ParSeg_TR4p5_stable
-  - 00008_db_MP2RAGE_0p75_UP_3x1
-  - 00009_db_MP2RAGE_0p75_UP_3x1_ph
-  - 00010_jb_greCAIPI_400_2x2d1_300_me4_MP_FC_e1
-  - 00010_jb_greCAIPI_400_2x2d1_300_me4_MP_FC_e2
-  - 00010_jb_greCAIPI_400_2x2d1_300_me4_MP_FC_e3
-  - 00010_jb_greCAIPI_400_2x2d1_300_me4_MP_FC_e4
+- 00004_db_MPRAGE_sm_xpace
+func:
+- 00005_ep2d_bold_2000
+- 00012_ep2d_bold_800_whole_brain
+- 00014_rslh_ep3d_vaso_WIP_Leipzig_3rd_ACSmono_stim02_test_run-01
+- 00015_rslh_ep3d_vaso_WIP_Leipzig_3rd_ACSmono_stim02_test_run-02
+- 00016_rslh_ep3d_vaso_WIP_Leipzig_3rd_ACSmono_task_run-01
+- 00017_pe_gre_jb_3DbSSFP_6_8pF_elli_TR4p09_PAT5_test_run-01
+- 00018_pe_gre_jb_3DbSSFP_6_8pF_elli_TR4p09_PAT5_task_run-01
+- 00020_rslh_ep3d_vaso_WIP_Leipzig_3rd_ACSmono_rs_run-01
+- 00021_pe_gre_jb_3DbSSFP_6_8pF_elli_TR4p09_PAT5_rs_run-01
+fmap:
+- 00013_ep2d_bold_800_whole_brain_revpe
+- 00019_rslh_ep3d_vaso_WIP_Leipzig_3rd_ACSmono_revPE_run-01
